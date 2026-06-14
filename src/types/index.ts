@@ -1,5 +1,20 @@
 export type Phase = 'day' | 'night'
 
+export type RhythmType = '醒木' | '拖腔' | '急口' | '留白' | '压低声'
+
+export interface Rhythm {
+  id: RhythmType
+  name: string
+  description: string
+  emoji: string
+  pace: number
+  volume: number
+  tension: number
+  tagSynergy: string[]
+  patienceDrain: number
+  hearingRequirement: number
+}
+
 export type Weather = '晴' | '云' | '雨' | '雪'
 
 export type SnackCategory = '茶' | '小吃' | '点心'
@@ -75,11 +90,15 @@ export interface Customer {
   preferenceTags: string[]
   generosity: number
   patience: number
+  patienceMax: number
   wealth: number
   socialInfluence: number
   seatId: number | null
   satisfaction: number
+  currentPatience: number
+  hearingQuality: number
   emoji: string
+  left: boolean
 }
 
 export interface InterruptionOption {
@@ -148,6 +167,12 @@ export interface GameState {
   storyScores: Record<string, number[]>
   isSettlement: boolean
   lastSettlement: SettlementResult | null
+  currentRhythm: RhythmType | null
+  rhythmHistory: RhythmType[]
+  rhythmImbalance: number
+  consecutiveSameRhythm: number
+  tempTips: number
+  rhythmTickCount: number
 }
 
 export interface SettlementResult {
@@ -169,4 +194,9 @@ export interface SettlementResult {
 export interface CalcResult {
   value: number
   details: Record<string, number>
+}
+
+export interface RhythmActions {
+  switchRhythm: (rhythm: RhythmType) => void
+  calculateHearingQuality: (seatId: number) => number
 }

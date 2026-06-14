@@ -14,6 +14,7 @@ import type {
   StoryRecord,
   ReputationHistory,
   Renovation,
+  RhythmType,
 } from '@/types'
 import { STORIES } from '@/data/stories'
 import { initSnacks } from '@/data/snacks'
@@ -22,6 +23,8 @@ import { initRenovations, getUpgradeCost } from '@/data/renovations'
 import { INTERRUPTIONS } from '@/data/interruptions'
 import { generateRandomCustomers } from '@/data/customers'
 import { calcSettlement } from '@/utils/settlement'
+import { RHYTHMS, calcRhythmVariety, calcRhythmMatch } from '@/data/rhythms'
+import { STAGE_POS } from '@/data/seats'
 
 const WEATHERS: Weather[] = ['晴', '晴', '晴', '云', '云', '雨', '雪']
 
@@ -67,6 +70,12 @@ const initialState: GameState = {
   storyScores: {},
   isSettlement: false,
   lastSettlement: null,
+  currentRhythm: null,
+  rhythmHistory: [],
+  rhythmImbalance: 0,
+  consecutiveSameRhythm: 0,
+  tempTips: 0,
+  rhythmTickCount: 0,
 }
 
 interface GameActions {
@@ -82,6 +91,10 @@ interface GameActions {
   nextDay: () => void
   resetGame: () => void
   addLedgerRecord: (type: LedgerRecord['type'], category: string, amount: number, note: string) => void
+  switchRhythm: (rhythm: RhythmType) => void
+  calculateHearingQuality: (seatId: number) => number
+  handleCustomerLeave: (customerId: string) => void
+  addTempTip: (amount: number, reason: string) => void
 }
 
 export const useGameStore = create<GameState & GameActions>()(
@@ -145,6 +158,22 @@ export const useGameStore = create<GameState & GameActions>()(
         get().addLedgerRecord('支出', '装修升级', cost, `升级${reno.name}至${reno.level + 1}级`)
       },
 
+      calculateHearingQuality: (seatId: number) => {
+        const state = get()
+        const seat = state.seats.find((s) => s.id === seatId)
+        if (!seat) return 50
+
+        const dist = Math.sqrt(
+          Math.pow(seat.x - STAGE_POS.x, 2) + Math.pow(seat.y - STAGE_POS.y, 2)
+        )
+        const baseQuality = Math.max(0, 100 - dist * 18)
+
+        const tierBonus: Record<Seat['tier'], number> = { 贵宾: 15, 雅座: 8, 普通: 0 }
+        const totalBonus = tierBonus[seat.tier]
+
+        return Math.min(100, Math.max(10, baseQuality + totalBonus))
+      },
+
       switchToNight: () => {
         const state = get()
         const weather = state.weather
@@ -168,6 +197,18 @@ export const useGameStore = create<GameState & GameActions>()(
           if (idx >= 0) seats[idx].occupied = true
         }
 
+        customers.forEach((c) => {
+          if (c.seatId !== null) {
+            const dist = Math.sqrt(
+              Math.pow(seats.find((s) => s.id === c.seatId)!.x - STAGE_POS.x, 2) +
+              Math.pow(seats.find((s) => s.id === c.seatId)!.y - STAGE_POS.y, 2)
+            )
+            const baseQuality = Math.max(0, 100 - dist * 18)
+            const tierBonus: Record<Seat['tier'], number> = { 贵宾: 15, 雅座: 8, 普通: 0 }
+            c.hearingQuality = Math.min(100, Math.max(10, baseQuality + tierBonus[seats.find((s) => s.id === c.seatId)!.tier]))
+          }
+        })
+
         const availableStories = pickRandomStories(3)
 
         set({
@@ -180,6 +221,12 @@ export const useGameStore = create<GameState & GameActions>()(
           storyProgress: 0,
           performanceActive: false,
           currentInterruption: null,
+          currentRhythm: null,
+          rhythmHistory: [],
+          rhythmImbalance: 0,
+          consecutiveSameRhythm: 0,
+          tempTips: 0,
+          rhythmTickCount: 0,
         })
       },
 
@@ -194,42 +241,242 @@ export const useGameStore = create<GameState & GameActions>()(
       startPerformance: () => {
         const state = get()
         if (!state.currentStory || !state.currentBranch) return
-        set({ performanceActive: true, storyProgress: 0 })
+        set({
+          performanceActive: true,
+          storyProgress: 0,
+          currentRhythm: '拖腔',
+          rhythmHistory: ['拖腔'],
+          rhythmImbalance: 0,
+          consecutiveSameRhythm: 1,
+          tempTips: 0,
+          rhythmTickCount: 0,
+        })
+      },
+
+      switchRhythm: (rhythm: RhythmType) => {
+        const state = get()
+        if (!state.performanceActive) return
+        if (state.currentInterruption) return
+
+        const prevRhythm = state.currentRhythm
+        const newHistory = [...state.rhythmHistory, rhythm].slice(-10)
+        const isSame = prevRhythm === rhythm
+
+        const newConsecutive = isSame ? state.consecutiveSameRhythm + 1 : 1
+        const varietyPenalty = calcRhythmVariety(newHistory)
+        const newImbalance = Math.min(100, varietyPenalty + (newConsecutive > 3 ? (newConsecutive - 3) * 5 : 0))
+
+        set({
+          currentRhythm: rhythm,
+          rhythmHistory: newHistory,
+          consecutiveSameRhythm: newConsecutive,
+          rhythmImbalance: newImbalance,
+        })
+      },
+
+      handleCustomerLeave: (customerId: string) => {
+        const state = get()
+        const customer = state.customers.find((c) => c.id === customerId)
+        if (!customer || customer.left) return
+
+        const customers = state.customers.map((c) =>
+          c.id === customerId ? { ...c, left: true, seatId: null } : c
+        )
+
+        const seats = state.seats.map((s) =>
+          s.id === customer.seatId ? { ...s, occupied: false } : s
+        )
+
+        const repLoss = Math.floor(customer.socialInfluence * 2)
+        const newRep = Math.max(0, state.reputation - repLoss)
+
+        set({
+          customers,
+          seats,
+          reputation: newRep,
+          reputationHistory: [
+            ...state.reputationHistory,
+            {
+              day: state.day,
+              value: newRep,
+              delta: -repLoss,
+              reason: `${customer.name}不满离席`,
+            },
+          ],
+        })
+      },
+
+      addTempTip: (amount: number, reason: string) => {
+        const state = get()
+        set({
+          tempTips: state.tempTips + amount,
+          gold: state.gold + amount,
+        })
+        get().addLedgerRecord('收入', '临时打赏', amount, reason)
       },
 
       tickPerformance: () => {
         const state = get()
         if (!state.performanceActive) return
+        if (state.currentInterruption) return
 
-        const newProgress = Math.min(100, state.storyProgress + 4)
+        const rhythm = state.currentRhythm ? RHYTHMS[state.currentRhythm] : RHYTHMS['拖腔']
+        const progressDelta = Math.max(1, Math.min(8, Math.round(rhythm.pace * 0.8)))
+        const newProgress = Math.min(100, state.storyProgress + progressDelta)
+        const newTickCount = state.rhythmTickCount + 1
 
-        if (!state.currentInterruption && Math.random() < 0.18 && state.storyProgress > 10 && state.storyProgress < 90) {
-          const seatedCustomers = state.customers.filter((c) => c.seatId !== null)
+        const storyTags = state.currentBranch?.tags || []
+
+        const rhythmMatch = state.currentRhythm ? calcRhythmMatch(state.currentRhythm, storyTags) : 0
+
+        let customers = state.customers.map((c) => {
+          if (c.seatId === null || c.left) return c
+
+          let satDelta = 0
+
+          const tagMatch = c.preferenceTags.some((t) => storyTags.includes(t))
+          if (tagMatch) satDelta += 1
+
+          satDelta += Math.floor(rhythmMatch / 10)
+
+          const hearingFactor = c.hearingQuality / 100
+          const hearingPenalty = (rhythm.hearingRequirement - c.hearingQuality / 10) * 0.5
+          if (hearingPenalty > 0) {
+            satDelta -= Math.floor(hearingPenalty * hearingFactor)
+          }
+
+          const patienceDelta = rhythm.patienceDrain
+          const newPatience = Math.max(0, c.currentPatience - patienceDelta)
+          if (newPatience < c.patienceMax * 0.3) {
+            satDelta -= 2
+          } else if (newPatience < c.patienceMax * 0.6) {
+            satDelta -= 1
+          }
+
+          if (state.rhythmImbalance > 30) {
+            satDelta -= 1
+          }
+          if (state.rhythmImbalance > 60) {
+            satDelta -= 2
+          }
+
+          if (rhythmMatch >= 16 && hearingFactor > 0.6 && c.satisfaction > 70) {
+            satDelta += 1
+          }
+
+          satDelta += Math.floor(Math.random() * 3) - 1
+
+          return {
+            ...c,
+            satisfaction: Math.max(0, Math.min(100, c.satisfaction + satDelta)),
+            currentPatience: newPatience,
+          }
+        })
+
+        if (state.rhythmImbalance > 40 && Math.random() < 0.15) {
+          const unhappy = customers.filter((c) => c.seatId !== null && !c.left && c.satisfaction < 40)
+          if (unhappy.length > 0) {
+            const c = unhappy[Math.floor(Math.random() * unhappy.length)]
+            const matching = state.interruptions.filter((i) => i.customerType === c.type)
+            const pool = matching.length > 0 ? matching : state.interruptions
+            const ev = pool[Math.floor(Math.random() * pool.length)]
+            set({
+              currentInterruption: ev,
+              storyProgress: newProgress,
+              customers,
+              rhythmTickCount: newTickCount,
+            })
+            return
+          }
+        }
+
+        if (!state.currentInterruption && Math.random() < 0.08 && state.storyProgress > 10 && state.storyProgress < 90) {
+          const seatedCustomers = customers.filter((c) => c.seatId !== null && !c.left)
           if (seatedCustomers.length > 0) {
             const c = seatedCustomers[Math.floor(Math.random() * seatedCustomers.length)]
             const matching = state.interruptions.filter((i) => i.customerType === c.type)
             const pool = matching.length > 0 ? matching : state.interruptions
             const ev = pool[Math.floor(Math.random() * pool.length)]
-            set({ currentInterruption: ev, storyProgress: newProgress })
+            set({
+              currentInterruption: ev,
+              storyProgress: newProgress,
+              customers,
+              rhythmTickCount: newTickCount,
+            })
             return
           }
         }
 
-        const customers = state.customers.map((c) => {
-          if (c.seatId === null) return c
-          let delta = Math.random() < 0.7 ? 1 : -1
-          if (state.currentStory && state.currentBranch) {
-            const match = state.currentBranch.tags.some((t) => c.preferenceTags.includes(t))
-            if (match) delta += 1
+        const leaving: Customer[] = []
+        customers = customers.map((c) => {
+          if (c.seatId === null || c.left) return c
+          if (c.satisfaction < 15 && c.currentPatience < c.patienceMax * 0.2 && Math.random() < 0.3) {
+            leaving.push(c)
+            return { ...c, left: true, seatId: null }
           }
-          return { ...c, satisfaction: Math.max(0, Math.min(100, c.satisfaction + delta)) }
+          return c
         })
 
+        if (leaving.length > 0) {
+          const seats = [...state.seats]
+          let totalRepLoss = 0
+          leaving.forEach((c) => {
+            const seatIdx = seats.findIndex((s) => s.id === c.seatId)
+            if (seatIdx >= 0) seats[seatIdx].occupied = false
+            totalRepLoss += Math.floor(c.socialInfluence * 2)
+          })
+
+          const newRep = Math.max(0, state.reputation - totalRepLoss)
+          const repHistory = [
+            ...state.reputationHistory,
+            {
+              day: state.day,
+              value: newRep,
+              delta: -totalRepLoss,
+              reason: `${leaving.length}位客人不满离席`,
+            },
+          ]
+
+          set({
+            customers,
+            seats,
+            reputation: newRep,
+            reputationHistory: repHistory,
+          })
+        }
+
+        if (newTickCount % 5 === 0) {
+          const happyCustomers = customers.filter(
+            (c) => c.seatId !== null && !c.left && c.satisfaction > 80
+          )
+          happyCustomers.forEach((c) => {
+            if (Math.random() < 0.15 * (c.generosity / 5)) {
+              const tipAmount = Math.floor(c.wealth * 0.05 * (c.satisfaction / 100))
+              if (tipAmount > 0) {
+                get().addTempTip(tipAmount, `${c.name}听得入迷，打赏${tipAmount}文`)
+              }
+            }
+          })
+        }
+
+        const newImbalance = Math.max(0, state.rhythmImbalance - 1)
+
         if (newProgress >= 100) {
-          set({ performanceActive: false, storyProgress: 100, customers })
+          set({
+            performanceActive: false,
+            storyProgress: 100,
+            customers,
+            rhythmImbalance: newImbalance,
+            rhythmTickCount: newTickCount,
+          })
           setTimeout(() => get().doSettlement(), 600)
         } else {
-          set({ storyProgress: newProgress, customers })
+          set({
+            storyProgress: newProgress,
+            customers,
+            rhythmImbalance: newImbalance,
+            rhythmTickCount: newTickCount,
+          })
         }
       },
 

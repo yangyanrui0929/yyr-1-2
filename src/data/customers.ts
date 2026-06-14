@@ -67,18 +67,23 @@ export function generateRandomCustomers(count: number): Customer[] {
   const result: Customer[] = []
   for (let i = 0; i < count; i++) {
     const tpl = CUSTOMER_TEMPLATES[Math.floor(Math.random() * CUSTOMER_TEMPLATES.length)]
+    const patienceVal = tpl.patience + Math.floor(Math.random() * 2) - 1
     result.push({
       id: `c-${Date.now()}-${i}`,
       type: tpl.type,
       name: `${tpl.name}${['甲', '乙', '丙', '丁', '戊', '己'][i % 6]}`,
       preferenceTags: [...tpl.preferenceTags],
       generosity: tpl.generosity + Math.floor(Math.random() * 2) - 1,
-      patience: tpl.patience + Math.floor(Math.random() * 2) - 1,
+      patience: patienceVal,
+      patienceMax: patienceVal * 20,
       wealth: tpl.baseWealth + Math.floor(Math.random() * tpl.baseWealth * 0.5),
       socialInfluence: tpl.socialInfluence,
       seatId: null,
       satisfaction: 50,
+      currentPatience: patienceVal * 20,
+      hearingQuality: 50,
       emoji: tpl.emoji,
+      left: false,
     })
   }
   return result
