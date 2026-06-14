@@ -310,9 +310,7 @@ export const useGameStore = create<GameState & GameActions>()(
         const state = get()
         set({
           tempTips: state.tempTips + amount,
-          gold: state.gold + amount,
         })
-        get().addLedgerRecord('收入', '临时打赏', amount, reason)
       },
 
       tickPerformance: () => {
@@ -328,6 +326,15 @@ export const useGameStore = create<GameState & GameActions>()(
         const storyTags = state.currentBranch?.tags || []
 
         const rhythmMatch = state.currentRhythm ? calcRhythmMatch(state.currentRhythm, storyTags) : 0
+
+        const newConsecutive = state.consecutiveSameRhythm + 1
+        let imbalanceDelta = 0
+        if (newConsecutive > 2) {
+          imbalanceDelta += (newConsecutive - 2) * 0.8
+        }
+        const varietyPenalty = calcRhythmVariety(state.rhythmHistory)
+        let newImbalance = Math.min(100, state.rhythmImbalance + imbalanceDelta + varietyPenalty * 0.1)
+        newImbalance = Math.max(0, newImbalance - 0.5)
 
         let customers = state.customers.map((c) => {
           if (c.seatId === null || c.left) return c
@@ -353,10 +360,10 @@ export const useGameStore = create<GameState & GameActions>()(
             satDelta -= 1
           }
 
-          if (state.rhythmImbalance > 30) {
+          if (newImbalance > 30) {
             satDelta -= 1
           }
-          if (state.rhythmImbalance > 60) {
+          if (newImbalance > 60) {
             satDelta -= 2
           }
 
@@ -373,10 +380,14 @@ export const useGameStore = create<GameState & GameActions>()(
           }
         })
 
-        if (state.rhythmImbalance > 40 && Math.random() < 0.15) {
-          const unhappy = customers.filter((c) => c.seatId !== null && !c.left && c.satisfaction < 40)
-          if (unhappy.length > 0) {
-            const c = unhappy[Math.floor(Math.random() * unhappy.length)]
+        const interruptionChance = 0.05 + (newImbalance / 100) * 0.35
+        if (Math.random() < interruptionChance && state.storyProgress > 10 && state.storyProgress < 90) {
+          const poolCustomers = newImbalance > 30
+            ? customers.filter((c) => c.seatId !== null && !c.left && c.satisfaction < 50)
+            : customers.filter((c) => c.seatId !== null && !c.left)
+          const targetPool = poolCustomers.length > 0 ? poolCustomers : customers.filter((c) => c.seatId !== null && !c.left)
+          if (targetPool.length > 0) {
+            const c = targetPool[Math.floor(Math.random() * targetPool.length)]
             const matching = state.interruptions.filter((i) => i.customerType === c.type)
             const pool = matching.length > 0 ? matching : state.interruptions
             const ev = pool[Math.floor(Math.random() * pool.length)]
@@ -385,23 +396,8 @@ export const useGameStore = create<GameState & GameActions>()(
               storyProgress: newProgress,
               customers,
               rhythmTickCount: newTickCount,
-            })
-            return
-          }
-        }
-
-        if (!state.currentInterruption && Math.random() < 0.08 && state.storyProgress > 10 && state.storyProgress < 90) {
-          const seatedCustomers = customers.filter((c) => c.seatId !== null && !c.left)
-          if (seatedCustomers.length > 0) {
-            const c = seatedCustomers[Math.floor(Math.random() * seatedCustomers.length)]
-            const matching = state.interruptions.filter((i) => i.customerType === c.type)
-            const pool = matching.length > 0 ? matching : state.interruptions
-            const ev = pool[Math.floor(Math.random() * pool.length)]
-            set({
-              currentInterruption: ev,
-              storyProgress: newProgress,
-              customers,
-              rhythmTickCount: newTickCount,
+              consecutiveSameRhythm: newConsecutive,
+              rhythmImbalance: newImbalance,
             })
             return
           }
@@ -410,7 +406,8 @@ export const useGameStore = create<GameState & GameActions>()(
         const leaving: Customer[] = []
         customers = customers.map((c) => {
           if (c.seatId === null || c.left) return c
-          if (c.satisfaction < 15 && c.currentPatience < c.patienceMax * 0.2 && Math.random() < 0.3) {
+          const leaveChance = 0.05 + (newImbalance / 100) * 0.25
+          if (c.satisfaction < 20 && c.currentPatience < c.patienceMax * 0.25 && Math.random() < leaveChance) {
             leaving.push(c)
             return { ...c, left: true, seatId: null }
           }
@@ -459,8 +456,6 @@ export const useGameStore = create<GameState & GameActions>()(
           })
         }
 
-        const newImbalance = Math.max(0, state.rhythmImbalance - 1)
-
         if (newProgress >= 100) {
           set({
             performanceActive: false,
@@ -468,6 +463,7 @@ export const useGameStore = create<GameState & GameActions>()(
             customers,
             rhythmImbalance: newImbalance,
             rhythmTickCount: newTickCount,
+            consecutiveSameRhythm: newConsecutive,
           })
           setTimeout(() => get().doSettlement(), 600)
         } else {
@@ -476,6 +472,7 @@ export const useGameStore = create<GameState & GameActions>()(
             customers,
             rhythmImbalance: newImbalance,
             rhythmTickCount: newTickCount,
+            consecutiveSameRhythm: newConsecutive,
           })
         }
       },
@@ -526,7 +523,7 @@ export const useGameStore = create<GameState & GameActions>()(
         const state = get()
         if (!state.currentStory || !state.currentBranch) return
 
-        const result = calcSettlement(
+        const baseResult = calcSettlement(
           state.day,
           state.currentStory,
           state.currentBranch,
@@ -539,6 +536,12 @@ export const useGameStore = create<GameState & GameActions>()(
           state.reputation,
           state.snacks
         )
+
+        const result = {
+          ...baseResult,
+          tempTips: state.tempTips,
+          totalEarnings: baseResult.totalEarnings + state.tempTips,
+        }
 
         const storyRecord: StoryRecord = {
           day: state.day,
@@ -589,6 +592,8 @@ export const useGameStore = create<GameState & GameActions>()(
           get().addLedgerRecord('收入', '连载期待', result.serialExpectBonus, '观众期待')
         if (result.tips > 0)
           get().addLedgerRecord('收入', '客人打赏', result.tips, '客人满意打赏')
+        if (result.tempTips > 0)
+          get().addLedgerRecord('收入', '临时打赏', result.tempTips, '听书途中打赏')
         if (result.snackRevenue > 0)
           get().addLedgerRecord('收入', '茶点售卖', result.snackRevenue, '消费茶点')
         if (result.badReviewPenalty > 0)

@@ -185,6 +185,7 @@ export interface SettlementResult {
   serialExpectBonus: number
   badReviewPenalty: number
   tips: number
+  tempTips: number
   snackRevenue: number
   totalEarnings: number
   reputationDelta: number

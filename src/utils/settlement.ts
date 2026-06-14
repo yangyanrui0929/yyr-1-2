@@ -105,6 +105,7 @@ export function calcSettlement(
     serialExpectBonus,
     badReviewPenalty,
     tips,
+    tempTips: 0,
     snackRevenue,
     totalEarnings,
     reputationDelta,
